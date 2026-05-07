@@ -32,12 +32,17 @@ function color(c, text) {
 }
 
 function getChangedFiles() {
-  const status = run('git status --short');
+  const status = run('git status --porcelain');
   if (!status) return [];
-  return status.split('\n').map(line => ({
-    status: line.substring(0, 2).trim(),
-    file: line.substring(3).trim(),
-  }));
+  return status.split('\n').map(line => {
+    // --porcelain format: "XY filename" or "XY orig -> dest" for renames
+    // XY is exactly 2 chars, then at least one space, then filename
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    const statusCode = trimmed.substring(0, 2).trim();
+    const file = trimmed.substring(2).trim().replace(/^.*->\s*/, ''); // handle renames
+    return { status: statusCode, file };
+  }).filter(f => f && f.file);
 }
 
 function generateMessage(files) {
@@ -50,13 +55,12 @@ function generateMessage(files) {
   if (modified.length > 0) parts.push(`修改 ${modified.length} 文件`);
   if (deleted.length > 0) parts.push(`删除 ${deleted.length} 文件`);
 
-  // Infer scope from common directory
-  const dirs = files.map(f => f.file.split('/')[0]);
-  const commonDir = dirs.every(d => d === dirs[0]) && dirs[0] !== 'root' ? dirs[0] : null;
+  // Build scope from affected directories (top-level)
+  const dirs = [...new Set(files.map(f => f.file.split('/')[0]))];
+  const scope = dirs.length === 1 ? dirs[0] : `${dirs.length} dirs`;
 
-  const scope = commonDir ? `(${commonDir})` : '';
   const subject = parts.join(', ') || '更新';
-  return `update${scope}: ${subject}`;
+  return `update(${scope}): ${subject}`;
 }
 
 function main() {
