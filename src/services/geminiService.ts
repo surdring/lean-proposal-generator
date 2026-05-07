@@ -19,12 +19,15 @@ const TAGS = {
 export const generateProposalStream = async (
   userIdea: string,
   userRole: string = "一线员工",
-  onUpdate: (data: Partial<ProposalData>) => void
+  onUpdate: (data: Partial<ProposalData>) => void,
+  model?: string,
+  apiKey?: string,
+  baseUrl?: string
 ): Promise<void> => {
   const response = await fetch('/api/generate-proposal', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ idea: userIdea, role: userRole }),
+    body: JSON.stringify({ idea: userIdea, role: userRole, model, apiKey, baseUrl }),
   });
 
   if (!response.ok) {
@@ -139,6 +142,65 @@ function parseAndNotify(
   onUpdate({ ...currentData });
 }
 
+// --- Fetch available models ---
+export interface ProviderPreset {
+  id: string;
+  name: string;
+  baseUrl: string;
+  needsApiKey: boolean;
+  defaultApiKey?: string;
+}
+
+export interface ModelsInfo {
+  default: string;
+  models: string[];
+  baseUrl: string;
+  hasApiKey: boolean;
+  providerPresets: ProviderPreset[];
+}
+
+export const fetchModels = async (): Promise<ModelsInfo> => {
+  const response = await fetch('/api/models');
+  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  return response.json();
+};
+
+// --- Fetch models from a specific provider ---
+export interface FetchedModels {
+  models: string[];
+  freeModels: string[];
+}
+
+export const fetchModelsFromProvider = async (apiKey?: string, baseUrl?: string): Promise<FetchedModels> => {
+  const response = await fetch('/api/fetch-models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey, baseUrl }),
+  });
+  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  const data = await response.json();
+  return { models: data.models || [], freeModels: data.freeModels || [] };
+};
+
+// --- Save config to server .env ---
+export interface SavedConfig {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  models: string[];
+}
+
+export const saveConfig = async (config: { apiKey?: string; baseUrl?: string; model?: string; models?: string }): Promise<SavedConfig> => {
+  const response = await fetch('/api/save-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  const data = await response.json();
+  return data.config;
+};
+
 export interface RequirementsData {
   projectName: string;
   background: string;
@@ -163,12 +225,15 @@ export const generateRequirementsStream = async (
   userIdea: string,
   userRole: string = "一线员工",
   proposalContext: Partial<ProposalData> | null = null,
-  onUpdate: (data: Partial<RequirementsData>) => void
+  onUpdate: (data: Partial<RequirementsData>) => void,
+  model?: string,
+  apiKey?: string,
+  baseUrl?: string
 ): Promise<void> => {
   const response = await fetch('/api/generate-requirements', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ idea: userIdea, role: userRole, proposalContext }),
+    body: JSON.stringify({ idea: userIdea, role: userRole, proposalContext, model, apiKey, baseUrl }),
   });
 
   if (!response.ok) {

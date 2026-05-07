@@ -11,7 +11,8 @@
     "start": "node --import tsx server/index.ts",
     "preview": "vite build && node --import tsx server/index.ts",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "commit": "node scripts/git-commit.js"
   },
   "dependencies": {
     "openai": "^4.103.0",

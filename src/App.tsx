@@ -1,9 +1,37 @@
-import React, { useState, useRef } from 'react';
-import { generateProposalStream, generateRequirementsStream, ProposalData, RequirementsData } from './services/geminiService';
-import { Loader2, Printer, Sparkles, FileText, Eraser, Download, FileJson, FileDown, ChevronDown } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { generateProposalStream, generateRequirementsStream, fetchModels, fetchModelsFromProvider, saveConfig, ProposalData, RequirementsData, ModelsInfo, ProviderPreset } from './services/geminiService';
+import { Loader2, Printer, Sparkles, FileText, Eraser, Download, FileJson, FileDown, ChevronDown, Cpu, Settings, Eye, EyeOff, RefreshCw, Save, Check } from 'lucide-react';
 import { motion } from 'motion/react';
 
 type DocType = 'proposal' | 'requirements';
+
+// Per-provider saved config
+interface ProviderConfig {
+  apiKey: string;
+  baseUrl: string;
+  models: string[];
+  freeModels: string[];
+  selectedModel: string;
+}
+
+function loadProviders(): Record<string, ProviderConfig> {
+  try {
+    const raw = localStorage.getItem('ai_providers');
+    if (raw) {
+      const data: Record<string, ProviderConfig> = JSON.parse(raw);
+      // Deduplicate models arrays from cached data
+      for (const key of Object.keys(data)) {
+        if (data[key].models) data[key].models = [...new Set(data[key].models)];
+      }
+      return data;
+    }
+  } catch {}
+  return {};
+}
+
+function saveProviders(providers: Record<string, ProviderConfig>) {
+  localStorage.setItem('ai_providers', JSON.stringify(providers));
+}
 
 // Strip markdown syntax for Word-like plain text display
 function stripMarkdown(text: string): string {
@@ -35,6 +63,143 @@ function App() {
   
   const [error, setError] = useState<string | null>(null);
 
+  // AI Settings (persisted in localStorage per provider)
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchModelsError, setFetchModelsError] = useState<string | null>(null);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [configSaved, setConfigSaved] = useState(false);
+  const [modelsInfo, setModelsInfo] = useState<ModelsInfo | null>(null);
+  const [providerPresets, setProviderPresets] = useState<ProviderPreset[]>([]);
+  const [showFreeOnly, setShowFreeOnly] = useState(false);
+  const [modelInput, setModelInput] = useState('');
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Active provider and per-provider configs
+  const [activeProviderId, setActiveProviderId] = useState(() => localStorage.getItem('ai_active_provider') || 'server');
+  const [providers, setProviders] = useState<Record<string, ProviderConfig>>(() => loadProviders());
+
+  // Current provider's config (convenience)
+  const currentConfig = providers[activeProviderId] || { apiKey: '', baseUrl: '', models: [] as string[], freeModels: [] as string[], selectedModel: '' };
+  // Ensure freeModels always exists (old localStorage data may lack this field)
+  const safeFreeModels = currentConfig.freeModels || [];
+
+  // Filtered model list for combobox dropdown
+  const displayModels = showFreeOnly && safeFreeModels.length > 0 ? safeFreeModels : currentConfig.models;
+  const isSearching = modelInput !== '' && modelInput !== currentConfig.selectedModel;
+  const filteredModels = isSearching
+    ? displayModels.filter(m => m.toLowerCase().includes(modelInput.toLowerCase()))
+    : displayModels;
+
+  // Effective settings for API calls
+  const effectiveBaseUrl = activeProviderId === 'server'
+    ? (modelsInfo?.baseUrl || '')
+    : (currentConfig.baseUrl || providerPresets.find(p => p.id === activeProviderId)?.baseUrl || '');
+  const effectiveApiKey = activeProviderId === 'server' ? '' : currentConfig.apiKey;
+  const effectiveModel = currentConfig.selectedModel || modelsInfo?.default || '';
+
+  // Save providers to localStorage when changed
+  useEffect(() => {
+    saveProviders(providers);
+    localStorage.setItem('ai_active_provider', activeProviderId);
+  }, [providers, activeProviderId]);
+
+  // Sync modelInput with selectedModel
+  useEffect(() => {
+    setModelInput(currentConfig.selectedModel || '');
+  }, [currentConfig.selectedModel]);
+
+  // Init: load server defaults and provider presets
+  useEffect(() => {
+    fetchModels().then(info => {
+      setModelsInfo(info);
+      setProviderPresets(info.providerPresets || []);
+      // If active provider is server, set models from server config
+      if (activeProviderId === 'server') {
+        setProviders(prev => ({
+          ...prev,
+          server: { ...prev.server, models: info.models, selectedModel: prev.server?.selectedModel || info.default }
+        }));
+      }
+    }).catch(() => {});
+  }, []);
+
+  const handleSwitchProvider = (id: string) => {
+    setActiveProviderId(id);
+    const preset = providerPresets.find(p => p.id === id);
+    // Initialize provider config if not exists
+    if (!providers[id]) {
+      setProviders(prev => ({
+        ...prev,
+        [id]: {
+          apiKey: preset?.defaultApiKey || '',
+          baseUrl: preset?.baseUrl || '',
+          models: [],
+          freeModels: [],
+          selectedModel: '',
+        }
+      }));
+    }
+  };
+
+  const updateProvider = (patch: Partial<ProviderConfig>) => {
+    setProviders(prev => ({
+      ...prev,
+      [activeProviderId]: { ...prev[activeProviderId], ...patch }
+    }));
+  };
+
+  const handleFetchModels = async () => {
+    setFetchingModels(true);
+    setFetchModelsError(null);
+    try {
+      const cfg = providers[activeProviderId] || currentConfig;
+      const baseUrl = cfg.baseUrl || providerPresets.find(p => p.id === activeProviderId)?.baseUrl;
+      const result = await fetchModelsFromProvider(
+        cfg.apiKey || undefined,
+        baseUrl || undefined
+      );
+      const models = [...new Set(result.models)];
+      const freeModels = [...new Set(result.freeModels)];
+      updateProvider({ models, freeModels });
+      if (models.length > 0 && !providers[activeProviderId]?.selectedModel) {
+        updateProvider({ selectedModel: models[0] });
+      }
+    } catch (err: any) {
+      const msg = err?.message || '获取模型列表失败';
+      setFetchModelsError(msg);
+      console.error('Failed to fetch models:', err);
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  const handleSaveConfig = async () => {
+    setSavingConfig(true);
+    setConfigSaved(false);
+    try {
+      const cfg = activeProviderId === 'server'
+        ? { model: currentConfig.selectedModel || modelsInfo?.default }
+        : {
+            apiKey: currentConfig.apiKey,
+            baseUrl: currentConfig.baseUrl || providerPresets.find(p => p.id === activeProviderId)?.baseUrl,
+            model: currentConfig.selectedModel,
+            models: currentConfig.models.join(','),
+          };
+      const saved = await saveConfig(cfg);
+      // Update server modelsInfo from saved result
+      setModelsInfo(prev => prev ? { ...prev, default: saved.model, models: saved.models, baseUrl: saved.baseUrl, hasApiKey: !!saved.apiKey } : prev);
+      setConfigSaved(true);
+      setTimeout(() => setConfigSaved(false), 2000);
+    } catch (err) {
+      console.error('Failed to save config:', err);
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
   // Form fields for the manual parts of the proposal
   const [proposer, setProposer] = useState('');
   const [unit, setUnit] = useState('');
@@ -50,13 +215,17 @@ function App() {
     if (docType === 'proposal') {
       setProposal({});
       setRequirements(null);
+      console.log('[AI] 当前使用模型:', effectiveModel || '(默认)', '| 提供商:', activeProviderId, '| BaseURL:', effectiveBaseUrl);
       try {
         await generateProposalStream(
           idea, 
           role || '员工',
           (data) => {
             setProposal(prev => ({ ...prev, ...data }));
-          }
+          },
+          effectiveModel || undefined,
+          effectiveApiKey || undefined,
+          effectiveBaseUrl || undefined
         );
       } catch (err) {
         setError('生成提案时出错，请重试。');
@@ -74,7 +243,10 @@ function App() {
           null,
           (data) => {
             setRequirements(prev => ({ ...prev, ...data }));
-          }
+          },
+          effectiveModel || undefined,
+          effectiveApiKey || undefined,
+          effectiveBaseUrl || undefined
         );
       } catch (err) {
         setError('生成需求文档时出错，请重试。');
@@ -103,7 +275,10 @@ function App() {
         proposal,
         (data) => {
           setRequirements(prev => ({ ...prev, ...data }));
-        }
+        },
+        effectiveModel || undefined,
+        effectiveApiKey || undefined,
+        effectiveBaseUrl || undefined
       );
     } catch (err) {
       setError('生成需求文档时出错，请重试。');
@@ -186,8 +361,8 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans print:bg-white">
       {/* Header - Hidden on Print */}
-      <header className="bg-slate-900 text-white py-6 px-4 shadow-md print:hidden">
-        <div className="max-w-5xl mx-auto flex items-center justify-between">
+      <header className="bg-slate-900 text-white py-6 px-4 md:px-8 shadow-md print:hidden">
+        <div className="w-full flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-blue-600 rounded-lg">
               <FileText className="w-6 h-6 text-white" />
@@ -229,6 +404,284 @@ function App() {
                 <FileJson className="w-4 h-4" />
                 需求文档
               </button>
+            </div>
+            
+            {/* AI Settings */}
+            <div className="mb-4">
+              <button
+                onClick={() => setSettingsOpen(!settingsOpen)}
+                className="w-full flex items-center justify-between gap-2 text-sm font-medium text-slate-700 hover:text-blue-600 transition-colors py-1"
+              >
+                <span className="flex items-center gap-1.5 min-w-0 flex-1">
+                  <Settings className="w-4 h-4 shrink-0" />
+                  <span className="truncate">AI 配置</span>
+                  {activeProviderId !== 'server' && (
+                    <span className="text-[10px] px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded-full border border-blue-200 truncate max-w-[80px]">
+                      {providerPresets.find(p => p.id === activeProviderId)?.name || activeProviderId}
+                    </span>
+                  )}
+                </span>
+                <ChevronDown className={`w-4 h-4 shrink-0 transition-transform ${settingsOpen ? 'rotate-180' : ''}`} />
+              </button>
+              
+              {settingsOpen && (
+                <div className="mt-3 space-y-3 p-3 bg-slate-50 rounded-lg border border-slate-200">
+                  {/* Provider Selector */}
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1.5">
+                      模型提供商
+                    </label>
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        onClick={() => handleSwitchProvider('server')}
+                        className={`px-2 py-1 text-[11px] rounded-md border transition-colors truncate max-w-full ${
+                          activeProviderId === 'server'
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white text-slate-600 border-slate-200 hover:border-blue-300'
+                        }`}
+                        title="服务器默认"
+                      >
+                        服务器默认
+                      </button>
+                      {providerPresets.map(p => (
+                        <button
+                          key={p.id}
+                          onClick={() => handleSwitchProvider(p.id)}
+                          className={`px-2 py-1 text-[11px] rounded-md border transition-colors truncate max-w-full ${
+                            activeProviderId === p.id
+                              ? 'bg-blue-600 text-white border-blue-600'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-blue-300'
+                          }`}
+                          title={p.name}
+                        >
+                          {p.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {activeProviderId !== 'server' && (
+                    <>
+                      {/* Base URL */}
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 mb-1">
+                          API Base URL
+                        </label>
+                        <input
+                          type="text"
+                          value={currentConfig.baseUrl}
+                          onChange={(e) => updateProvider({ baseUrl: e.target.value })}
+                          placeholder={providerPresets.find(p => p.id === activeProviderId)?.baseUrl || 'https://api.openai.com/v1'}
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-xs bg-white truncate"
+                        />
+                      </div>
+
+                      {/* API Key */}
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 mb-1">
+                          API Key
+                        </label>
+                        <div className="relative">
+                          <input
+                            type={showApiKey ? 'text' : 'password'}
+                            value={currentConfig.apiKey}
+                            onChange={(e) => updateProvider({ apiKey: e.target.value })}
+                            placeholder="输入 API Key（Ollama 等本地模型可留空）"
+                            className="w-full px-2.5 py-1.5 pr-8 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-xs bg-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowApiKey(!showApiKey)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                          >
+                            {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Model */}
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 mb-1 flex items-center gap-1">
+                          <Cpu className="w-3 h-3" />
+                          模型
+                        </label>
+                        {currentConfig.models.length > 0 ? (
+                          <>
+                            <div className="flex gap-1.5 min-w-0">
+                              <div className="relative flex-1 min-w-0" ref={modelDropdownRef}>
+                                <input
+                                  type="text"
+                                  value={modelInput}
+                                  onChange={(e) => {
+                                    setModelInput(e.target.value);
+                                    updateProvider({ selectedModel: e.target.value });
+                                    setModelDropdownOpen(true);
+                                  }}
+                                  onFocus={() => setModelDropdownOpen(true)}
+                                  onBlur={() => setTimeout(() => setModelDropdownOpen(false), 150)}
+                                  placeholder="输入或选择模型"
+                                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-xs bg-white pr-7 truncate"
+                                  title={currentConfig.selectedModel}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setModelDropdownOpen(prev => !prev)}
+                                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                  tabIndex={-1}
+                                >
+                                  <ChevronDown className="w-3 h-3" />
+                                </button>
+                                {modelDropdownOpen && filteredModels.length > 0 && (
+                                  <div className="absolute z-50 left-0 right-0 top-full mt-0.5 bg-white border border-slate-200 rounded-md shadow-lg max-h-48 overflow-y-auto">
+                                    {filteredModels.map((m) => (
+                                      <div
+                                        key={m}
+                                        onMouseDown={() => {
+                                          setModelInput(m);
+                                          updateProvider({ selectedModel: m });
+                                          setModelDropdownOpen(false);
+                                        }}
+                                        className={`px-2.5 py-1.5 text-xs cursor-pointer truncate ${
+                                          m === currentConfig.selectedModel
+                                            ? 'bg-blue-50 text-blue-700 font-medium'
+                                            : 'text-slate-700 hover:bg-slate-50'
+                                        }`}
+                                        title={m}
+                                      >
+                                        {m}
+                                        {safeFreeModels.includes(m) && (
+                                          <span className="ml-1 text-[9px] text-green-600 font-normal">免费</span>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <button
+                                onClick={handleFetchModels}
+                                disabled={fetchingModels}
+                                className="px-2 py-1.5 bg-blue-50 text-blue-600 rounded-md hover:bg-blue-100 transition-colors border border-blue-200 disabled:opacity-50 shrink-0"
+                                title="刷新模型列表"
+                              >
+                                <RefreshCw className={`w-3.5 h-3.5 ${fetchingModels ? 'animate-spin' : ''}`} />
+                              </button>
+                            </div>
+                            {currentConfig.models.length > 0 && (
+                              <div className="mt-1.5">
+                                <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                                  <input
+                                    type="checkbox"
+                                    checked={showFreeOnly}
+                                    onChange={(e) => {
+                                      setShowFreeOnly(e.target.checked);
+                                      if (e.target.checked && safeFreeModels.length > 0 && !safeFreeModels.includes(currentConfig.selectedModel)) {
+                                        updateProvider({ selectedModel: safeFreeModels[0] });
+                                        setModelInput(safeFreeModels[0]);
+                                      }
+                                    }}
+                                    className="w-3 h-3 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                  />
+                                  <span className="text-[10px] text-slate-500">只显示免费模型</span>
+                                  <span className="text-[10px] text-slate-400">({safeFreeModels.length}/{currentConfig.models.length})</span>
+                                </label>
+                                {showFreeOnly && safeFreeModels.length === 0 && (
+                                  <p className="text-[10px] text-amber-500 mt-0.5">该提供商未返回免费模型信息，无法筛选</p>
+                                )}
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <div className="space-y-1.5">
+                            <input
+                              type="text"
+                              value={currentConfig.selectedModel}
+                              onChange={(e) => updateProvider({ selectedModel: e.target.value })}
+                              placeholder="输入模型名称，如 gpt-4o、deepseek-chat"
+                              className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-xs bg-white truncate"
+                            />
+                            <button
+                              onClick={handleFetchModels}
+                              disabled={fetchingModels}
+                              className="w-full px-2 py-1.5 bg-blue-50 text-blue-600 rounded-md hover:bg-blue-100 transition-colors border border-blue-200 disabled:opacity-50 text-xs flex items-center justify-center gap-1"
+                            >
+                              <RefreshCw className={`w-3 h-3 ${fetchingModels ? 'animate-spin' : ''}`} />
+                              {fetchingModels ? '获取中...' : '从 Provider 获取模型列表'}
+                            </button>
+                          </div>
+                        )}
+                        {fetchModelsError && (
+                          <p className="text-[10px] text-red-500 mt-1">{fetchModelsError}</p>
+                        )}
+                        <p className="text-[10px] text-slate-400 mt-1">可直接输入模型名，或点击按钮获取列表</p>
+                      </div>
+
+                      {/* Save to .env */}
+                      <button
+                        onClick={handleSaveConfig}
+                        disabled={savingConfig || !currentConfig.selectedModel}
+                        className={`w-full px-3 py-2 rounded-md text-xs font-medium flex items-center justify-center gap-1.5 transition-all ${
+                          configSaved
+                            ? 'bg-green-50 text-green-600 border border-green-200'
+                            : 'bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:bg-slate-300'
+                        }`}
+                      >
+                        {configSaved ? (
+                          <><Check className="w-3.5 h-3.5" /> 已保存到 .env</>
+                        ) : savingConfig ? (
+                          <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 保存中...</>
+                        ) : (
+                          <><Save className="w-3.5 h-3.5" /> 保存为服务器默认配置</>
+                        )}
+                      </button>
+                      <p className="text-[10px] text-slate-400">保存后服务器重启也将保留此配置</p>
+                    </>
+                  )}
+
+                  {activeProviderId === 'server' && (
+                    <div className="text-xs text-slate-500 space-y-1">
+                      <p>使用服务器 <code className="bg-slate-200 px-1 rounded">.env</code> 中配置的默认模型。</p>
+                      {modelsInfo && (
+                        <>
+                          <p>Base URL: <code className="bg-slate-200 px-1 rounded text-[10px]">{modelsInfo.baseUrl}</code></p>
+                          <p>模型: <code className="bg-slate-200 px-1 rounded text-[10px]">{modelsInfo.default}</code></p>
+                          {modelsInfo.models.length > 1 && (
+                            <div className="mt-1">
+                              <label className="block text-xs font-medium text-slate-600 mb-1">选择模型</label>
+                              <select
+                                value={currentConfig.selectedModel}
+                                onChange={(e) => updateProvider({ selectedModel: e.target.value })}
+                                className="w-full min-w-0 px-2.5 py-1.5 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-xs bg-white truncate"
+                                title={currentConfig.selectedModel}
+                              >
+                                {modelsInfo.models.map((m) => (
+                                  <option key={m} value={m} title={m}>{m}{m === modelsInfo.default ? ' (默认)' : ''}</option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                          <button
+                            onClick={handleSaveConfig}
+                            disabled={savingConfig}
+                            className={`w-full mt-2 px-3 py-2 rounded-md text-xs font-medium flex items-center justify-center gap-1.5 transition-all ${
+                              configSaved
+                                ? 'bg-green-50 text-green-600 border border-green-200'
+                                : 'bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50'
+                            }`}
+                          >
+                            {configSaved ? (
+                              <><Check className="w-3.5 h-3.5" /> 已保存</>
+                            ) : savingConfig ? (
+                              <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 保存中...</>
+                            ) : (
+                              <><Save className="w-3.5 h-3.5" /> 保存为默认</>
+                            )}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             
             <div className="space-y-4">

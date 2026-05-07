@@ -1,6 +1,7 @@
 import express from 'express';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -10,16 +11,201 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const AI_API_KEY = process.env.AI_API_KEY || 'sk-no-key';
-const AI_BASE_URL = process.env.AI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai';
-const AI_MODEL = process.env.AI_MODEL || 'gemini-2.0-flash';
+// Mutable runtime config (can be updated via /api/save-config)
+let AI_API_KEY = process.env.AI_API_KEY || 'sk-no-key';
+let AI_BASE_URL = process.env.AI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai';
+let AI_MODEL = process.env.AI_MODEL || 'gemini-2.0-flash';
 
-const client = new OpenAI({
-  apiKey: AI_API_KEY,
-  baseURL: AI_BASE_URL,
-});
+// Configurable model list: comma-separated in AI_MODELS env var, or defaults based on provider
+let AI_MODELS = process.env.AI_MODELS
+  ? process.env.AI_MODELS.split(',').map(s => s.trim()).filter(Boolean)
+  : [AI_MODEL];
+
+// Create an OpenAI client with optional overrides
+function createClient(apiKey?: string, baseUrl?: string) {
+  return new OpenAI({
+    apiKey: apiKey || AI_API_KEY,
+    baseURL: baseUrl || AI_BASE_URL,
+  });
+}
+
+// Scan PROVIDER_* env vars into presets (auto-mapped, no code changes needed to add providers)
+interface ServerProviderPreset {
+  id: string;
+  name: string;
+  baseUrl: string;
+  needsApiKey: boolean;
+  defaultApiKey?: string;
+}
+
+function scanProviderPresets(): ServerProviderPreset[] {
+  const map: Record<string, ServerProviderPreset> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith('PROVIDER_')) continue;
+    // API_KEY can be empty string (meaning not needed), so allow empty for API_KEY only
+    if (value === undefined) continue;
+    const rest = key.substring('PROVIDER_'.length); // e.g. OPENAI_BASE_URL
+    const firstUnderscore = rest.indexOf('_');
+    if (firstUnderscore === -1) continue;
+    const id = rest.substring(0, firstUnderscore).toLowerCase();
+    const field = rest.substring(firstUnderscore + 1);
+    if (!map[id]) map[id] = { id, name: '', baseUrl: '', needsApiKey: true };
+    if (field === 'NAME') map[id].name = value;
+    else if (field === 'BASE_URL') map[id].baseUrl = value;
+    else if (field === 'API_KEY') {
+      // Empty string = not needed; omitted = required but no default; non-empty = default value
+      if (value === '') {
+        map[id].needsApiKey = false;
+      } else {
+        map[id].needsApiKey = true;
+        map[id].defaultApiKey = value;
+      }
+    }
+  }
+  return Object.values(map).filter(p => p.name);
+}
+
+const PROVIDER_PRESETS = scanProviderPresets();
 
 app.use(express.json());
+
+// --- Models endpoint ---
+app.get('/api/models', (_req, res) => {
+  res.json({
+    default: AI_MODEL,
+    models: AI_MODELS,
+    baseUrl: AI_BASE_URL,
+    hasApiKey: !!AI_API_KEY && AI_API_KEY !== 'sk-no-key',
+    providerPresets: PROVIDER_PRESETS,
+  });
+});
+
+// --- Save config to .env ---
+const ENV_PATH = path.resolve(process.cwd(), '.env');
+
+app.post('/api/save-config', (req, res) => {
+  const { apiKey, baseUrl, model, models } = req.body;
+
+  // Read existing .env content
+  let envContent = '';
+  try {
+    envContent = fs.readFileSync(ENV_PATH, 'utf-8');
+  } catch {
+    // .env may not exist yet
+  }
+
+  const lines = envContent.split('\n');
+  const updated: Record<string, string> = {};
+
+  if (apiKey !== undefined) updated.AI_API_KEY = apiKey;
+  if (baseUrl !== undefined) updated.AI_BASE_URL = baseUrl;
+  if (model !== undefined) updated.AI_MODEL = model;
+  if (models !== undefined) updated.AI_MODELS = models;
+
+  // Update lines: replace existing keys or append
+  const keySet = new Set(Object.keys(updated));
+  const newLines: string[] = [];
+  const handled = new Set<string>();
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Skip comments and empty lines as-is
+    if (trimmed.startsWith('#') || trimmed === '') {
+      newLines.push(line);
+      continue;
+    }
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) {
+      newLines.push(line);
+      continue;
+    }
+    const key = trimmed.substring(0, eqIdx).trim();
+    if (keySet.has(key)) {
+      // Replace with new value
+      const val = updated[key];
+      newLines.push(`${key}="${val}"`);
+      handled.add(key);
+    } else {
+      newLines.push(line);
+    }
+  }
+
+  // Append any keys not found in existing file
+  for (const key of Object.keys(updated)) {
+    if (!handled.has(key)) {
+      newLines.push(`${key}="${updated[key]}"`);
+    }
+  }
+
+  const newContent = newLines.join('\n');
+
+  try {
+    fs.writeFileSync(ENV_PATH, newContent, 'utf-8');
+
+    // Update runtime config
+    if (apiKey !== undefined) AI_API_KEY = apiKey;
+    if (baseUrl !== undefined) AI_BASE_URL = baseUrl;
+    if (model !== undefined) AI_MODEL = model;
+    if (models !== undefined) AI_MODELS = models.split(',').map((s: string) => s.trim()).filter(Boolean);
+
+    console.log(`Config saved to .env: model=${AI_MODEL}, baseUrl=${AI_BASE_URL}`);
+    res.json({ success: true, config: { apiKey: AI_API_KEY, baseUrl: AI_BASE_URL, model: AI_MODEL, models: AI_MODELS } });
+  } catch (err: any) {
+    console.error('Error saving config:', err);
+    res.status(500).json({ error: err.message || 'Failed to save config' });
+  }
+});
+
+// --- Fetch models from provider ---
+app.post('/api/fetch-models', async (req, res) => {
+  const { apiKey, baseUrl } = req.body;
+  try {
+    const tempClient = createClient(apiKey, baseUrl);
+    const models = await tempClient.models.list();
+    const seen = new Set<string>();
+    const allIds: string[] = [];
+    const freeIds: string[] = [];
+    // Sort by id first
+    const sorted = [...models.data].sort((a: any, b: any) => a.id.localeCompare(b.id));
+    // Debug: log first model's available fields to help identify free model markers
+    if (sorted.length > 0) {
+      const sample = sorted[0] as any;
+      console.log(`[fetch-models] Sample model fields (${baseUrl}): id=${sample.id}, keys=${Object.keys(sample).join(',')}, pricing=${JSON.stringify(sample.pricing)}, tags=${JSON.stringify(sample.tags)}, metadata=${JSON.stringify(sample.metadata)}`);
+    }
+    for (const m of sorted) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      allIds.push(m.id);
+      // Detect free models across providers:
+      // 1. OpenRouter: pricing.prompt === "0" or pricing.completion === "0"
+      // 2. OpenRouter / SiliconFlow: model ID ends with ":free"
+      // 3. NVIDIA NIM: some models have "free" in metadata or tags
+      // 4. Generic: check common fields (is_free, free, metadata.free)
+      const obj = m as any;
+      const id = m.id;
+      const pricing = obj.pricing;
+      const metadata = obj.metadata;
+      const tags: string[] = obj.tags || [];
+      const isFree =
+        // OpenRouter pricing
+        (pricing && (pricing.prompt === '0' || pricing.completion === '0')) ||
+        // :free suffix (OpenRouter, SiliconFlow)
+        id.endsWith(':free') ||
+        // NVIDIA NIM: tags contains "free"
+        tags.some((t: string) => t.toLowerCase() === 'free') ||
+        // NVIDIA NIM: metadata.free
+        (metadata && metadata.free === true) ||
+        // Generic fields
+        obj.is_free === true ||
+        obj.free === true;
+      if (isFree) freeIds.push(id);
+    }
+    res.json({ models: allIds, freeModels: freeIds });
+  } catch (error: any) {
+    console.error('Error fetching models:', error.message);
+    res.status(500).json({ error: error.message || 'Failed to fetch models' });
+  }
+});
 
 // SSE helper
 function sendSSE(res: express.Response, event: string, data: string) {
@@ -28,7 +214,7 @@ function sendSSE(res: express.Response, event: string, data: string) {
 
 // --- Proposal generation endpoint ---
 app.post('/api/generate-proposal', async (req, res) => {
-  const { idea, role } = req.body;
+  const { idea, role, model: reqModel, apiKey: reqApiKey, baseUrl: reqBaseUrl } = req.body;
   if (!idea) {
     res.status(400).json({ error: 'idea is required' });
     return;
@@ -83,8 +269,11 @@ ${TAGS.budget}
 `;
 
   try {
-    const stream = await client.chat.completions.create({
-      model: AI_MODEL,
+    const useModel = reqModel || AI_MODEL;
+    const useClient = createClient(reqApiKey, reqBaseUrl);
+    console.log(`Generating proposal with model: ${useModel}, baseUrl: ${reqBaseUrl || AI_BASE_URL}`);
+    const stream = await useClient.chat.completions.create({
+      model: useModel,
       messages: [{ role: 'user', content: prompt }],
       stream: true,
     });
@@ -108,7 +297,7 @@ ${TAGS.budget}
 
 // --- Requirements generation endpoint ---
 app.post('/api/generate-requirements', async (req, res) => {
-  const { idea, role, proposalContext } = req.body;
+  const { idea, role, proposalContext, model: reqModel, apiKey: reqApiKey, baseUrl: reqBaseUrl } = req.body;
   if (!idea) {
     res.status(400).json({ error: 'idea is required' });
     return;
@@ -178,8 +367,11 @@ ${REQ_TAGS.successMetrics}
 `;
 
   try {
-    const stream = await client.chat.completions.create({
-      model: AI_MODEL,
+    const useModel = reqModel || AI_MODEL;
+    const useClient = createClient(reqApiKey, reqBaseUrl);
+    console.log(`Generating requirements with model: ${useModel}, baseUrl: ${reqBaseUrl || AI_BASE_URL}`);
+    const stream = await useClient.chat.completions.create({
+      model: useModel,
       messages: [{ role: 'user', content: prompt }],
       stream: true,
     });
