@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * 通用 Git 提交助手
+ * 通用 Git 提交助手（提交后自动推送）
  *
  * 运行方式:
- *   1. npm run commit                    # 自动生成提交信息
- *   2. npm run commit -- "feat: xxx"     # 自定义提交信息
+ *   1. npm run commit                    # 自动生成提交信息 + push
+ *   2. npm run commit -- "feat: xxx"     # 自定义提交信息 + push
  *   3. node scripts/git-commit.js          # 直接运行
  *   4. node scripts/git-commit.js "feat: xxx"  # 带自定义信息
  *
@@ -104,7 +104,13 @@ function main() {
   try {
     run(`git commit -m "${message}"`);
     const hash = run('git rev-parse --short HEAD');
-    console.log(color('green', `  提交成功: ${hash}\n`));
+    console.log(color('green', `  提交成功: ${hash}`));
+    try {
+      run(`git push origin ${branch}`);
+      console.log(color('green', `  推送成功: origin/${branch}\n`));
+    } catch (err) {
+      console.log(color('yellow', `  推送失败: ${err.message}\n`));
+    }
   } catch (err) {
     console.log(color('red', `  提交失败: ${err.message}\n`));
     process.exit(1);
