@@ -207,6 +207,26 @@ app.post('/api/fetch-models', async (req, res) => {
   }
 });
 
+// --- Test model endpoint ---
+app.post('/api/test-model', async (req, res) => {
+  const { model: reqModel, apiKey: reqApiKey, baseUrl: reqBaseUrl } = req.body;
+  const useModel = reqModel || AI_MODEL;
+  try {
+    const useClient = createClient(reqApiKey, reqBaseUrl);
+    const start = Date.now();
+    const completion = await useClient.chat.completions.create({
+      model: useModel,
+      messages: [{ role: 'user', content: 'Hi' }],
+      max_tokens: 5,
+    });
+    const latency = Date.now() - start;
+    const reply = completion.choices[0]?.message?.content || '(empty)';
+    res.json({ success: true, latency, reply, model: useModel });
+  } catch (error: any) {
+    res.status(400).json({ success: false, error: error.message || 'Unknown error', model: useModel });
+  }
+});
+
 // SSE helper
 function sendSSE(res: express.Response, event: string, data: string) {
   res.write(`event: ${event}\ndata: ${data}\n\n`);
@@ -401,7 +421,7 @@ app.get('*', (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 精益提案生成器服务已启动: http://localhost:${PORT}`);
+  console.log(`🚀 Lean Proposal Generator 服务已启动: http://localhost:${PORT}`);
   console.log(`   API Base URL: ${AI_BASE_URL}`);
   console.log(`   Model: ${AI_MODEL}`);
   console.log(`   API Key: ${AI_API_KEY ? AI_API_KEY.slice(0, 8) + '...' : '(empty)'}`);

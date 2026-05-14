@@ -338,3 +338,26 @@ function parseAndNotifyRequirements(
 
   onUpdate({ ...currentData });
 }
+
+export interface TestModelResult {
+  success: boolean;
+  latency?: number;
+  reply?: string;
+  model?: string;
+  error?: string;
+}
+
+export const testModel = async (
+  model?: string,
+  apiKey?: string,
+  baseUrl?: string
+): Promise<TestModelResult> => {
+  const response = await fetch('/api/test-model', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, apiKey, baseUrl }),
+  });
+
+  const data = await response.json();
+  return data;
+};

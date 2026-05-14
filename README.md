@@ -1,6 +1,6 @@
-# 精益提案生成器
+# Lean Proposal Generator
 
-基于AI的精益改善提案与需求文档生成工具。支持生成《月度精益改善自主性提案》和《项目需求规格说明书》(PRD)。
+AI-powered Lean Improvement Proposal & Requirements Document Generator. Supports generating 《月度精益改善自主性提案》 and 《项目需求规格说明书》(PRD).
 
 ## 架构
 
